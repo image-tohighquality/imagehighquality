@@ -3,16 +3,27 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+# ── Telegram ──────────────────────────────────────────────────────────────────
 BOT_TOKEN: str           = os.getenv("TELEGRAM_BOT_TOKEN", "")
+ADMIN_USER_ID: int       = int(os.getenv("ADMIN_USER_ID", "0"))
+
+# ── Claude API ────────────────────────────────────────────────────────────────
 CLAUDE_API_KEY: str      = os.getenv("CLAUDE_API_KEY", "")
-MAX_IMAGES_PER_HOUR: int = int(os.getenv("MAX_IMAGES_PER_HOUR", "5"))
 CLAUDE_MODEL: str        = os.getenv("CLAUDE_MODEL", "claude-sonnet-4-5")
+MAX_TOKENS: int          = 2500
+CLAUDE_TIMEOUT: float    = 120.0
 
-MAX_TOKENS: int          = 2500    # 2500 produces complete prompts, ~30% faster than 3500
-CLAUDE_TIMEOUT: float    = 120.0   # Railway has no hard process limit — 120s covers all cases
+# ── Supabase ──────────────────────────────────────────────────────────────────
+SUPABASE_URL: str        = os.getenv("SUPABASE_URL", "")
+SUPABASE_KEY: str        = os.getenv("SUPABASE_ANON_KEY", "")
+DB_ENABLED: bool         = bool(SUPABASE_URL and SUPABASE_KEY)
 
-MAX_IMAGE_BYTES: int     = 5 * 1024 * 1024   # 5 MB — Claude hard limit
-TELEGRAM_MSG_LIMIT: int  = 4000              # Telegram cap is 4096, safe margin
+# ── Rate limiting ─────────────────────────────────────────────────────────────
+MAX_IMAGES_PER_HOUR: int = int(os.getenv("MAX_IMAGES_PER_HOUR", "5"))
+
+# ── Telegram limits ───────────────────────────────────────────────────────────
+MAX_IMAGE_BYTES: int     = 5 * 1024 * 1024
+TELEGRAM_MSG_LIMIT: int  = 4000
 
 SUPPORTED_MIME_TYPES: dict[str, str] = {
     "image/jpeg": "image/jpeg",
@@ -22,6 +33,7 @@ SUPPORTED_MIME_TYPES: dict[str, str] = {
     "image/gif":  "image/gif",
 }
 
+# ── Validation ────────────────────────────────────────────────────────────────
 if not BOT_TOKEN:
     raise EnvironmentError("TELEGRAM_BOT_TOKEN is not set")
 if not CLAUDE_API_KEY:
