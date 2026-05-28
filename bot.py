@@ -1,12 +1,6 @@
 """
 bot.py — Image Quality Bot v1.5
 Railway long-polling deployment.
-
-New in v1.5:
-  - User registration in Supabase on every interaction
-  - Request logging (type, success, response time)
-  - DB-backed rate limiting with in-memory fallback
-  - /stats command (admin only)
 """
 
 import io
@@ -31,7 +25,7 @@ from telegram.constants import ParseMode
 import messages as msg
 from config import (
     BOT_TOKEN,
-    ADMIN_USER_ID,
+    ADMIN_IDENTIFIER,
     MAX_IMAGES_PER_HOUR,
     MAX_IMAGE_BYTES,
     TELEGRAM_MSG_LIMIT,
@@ -55,6 +49,30 @@ PATCH_KEYWORDS = {
     "مشكلة", "خاطئ", "سيء", "غلط", "تغير", "اصلح", "فشل", "رديء",
     "fix", "problem", "wrong", "bad", "failed", "patch", "incorrect",
 }
+
+
+# ── Admin check ───────────────────────────────────────────────────────────────
+
+def _is_admin(user) -> bool:
+    """
+    Check if a Telegram user is the bot admin.
+    ADMIN_IDENTIFIER can be:
+      - Numeric ID:  "123456789"
+      - Username:    "forca91"  or  "@forca91"  (@ stripped in config)
+    """
+    identifier = ADMIN_IDENTIFIER.strip()
+    if not identifier:
+        return False
+
+    # Numeric ID comparison
+    if identifier.isdigit():
+        return user.id == int(identifier)
+
+    # Username comparison (case-insensitive)
+    if user.username:
+        return user.username.lower() == identifier.lower()
+
+    return False
 
 
 # ── Subscription gate ─────────────────────────────────────────────────────────
@@ -142,11 +160,30 @@ async def cmd_start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     await update.message.reply_text(msg.WELCOME, parse_mode=ParseMode.HTML)
 
 
+async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Show user their own Telegram ID and username — useful for setup."""
+    user = update.effective_user
+    username_line = f"👤 المعرف: @{user.username}" if user.username else "👤 المعرف: لا يوجد"
+    await update.message.reply_text(
+        f"🪪 <b>بيانات حسابك</b>\n\n"
+        f"🔢 الـ ID الرقمي: <code>{user.id}</code>\n"
+        f"{username_line}\n\n"
+        f"<i>يمكنك استخدام أي منهما في متغير ADMIN_USER_ID</i>",
+        parse_mode=ParseMode.HTML,
+    )
+
+
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin-only statistics command."""
-    user_id = update.effective_user.id
+    user = update.effective_user
 
-    if ADMIN_USER_ID == 0 or user_id != ADMIN_USER_ID:
+    if not _is_admin(user):
+        # Log unauthorized attempt with actual user info to help debug
+        logger.warning(
+            f"Unauthorized /stats attempt — "
+            f"id={user.id} username={user.username!r} "
+            f"ADMIN_IDENTIFIER={ADMIN_IDENTIFIER!r}"
+        )
         await update.message.reply_text(msg.STATS_UNAUTHORIZED)
         return
 
@@ -167,7 +204,7 @@ async def handle_verify_subscription(
 ) -> None:
     query = update.callback_query
     await query.answer()
-    user    = update.effective_user
+    user = update.effective_user
     subscribed = await is_member(context.bot, user.id)
     if subscribed:
         await register_user(user.id, user.username, user.first_name)
@@ -175,7 +212,7 @@ async def handle_verify_subscription(
         await context.bot.send_message(
             chat_id=user.id, text=msg.WELCOME, parse_mode=ParseMode.HTML
         )
-        logger.info(f"User {user.id} subscription verified")
+        logger.info(f"User {user.id} (@{user.username}) subscription verified")
     else:
         await query.answer(
             "❌ لم يتم الاشتراك بعد. انضم للقناة أولاً ثم اضغط تحقق.",
@@ -195,18 +232,15 @@ async def _process_image(
     context: ContextTypes.DEFAULT_TYPE,
     download_fn,
 ) -> None:
-    user     = update.effective_user
-    user_id  = user.id
-    caption  = (update.message.caption or "").strip()
+    user    = update.effective_user
+    user_id = user.id
+    caption = (update.message.caption or "").strip()
 
-    # Register user in DB (upsert — safe to call every time)
     await register_user(user_id, user.username, user.first_name)
 
-    # Subscription gate
     if not await _check_subscription(update, context):
         return
 
-    # Rate limit (DB-backed with in-memory fallback)
     if not await check_rate_limit(user_id):
         secs    = seconds_until_reset(user_id)
         minutes = max(1, secs // 60)
@@ -226,9 +260,9 @@ async def _process_image(
         ])
     )
 
-    start_ms  = int(time.monotonic() * 1000)
-    success   = False
-    req_type  = "patch" if is_patch else "analyze"
+    start_ms = int(time.monotonic() * 1000)
+    success  = False
+    req_type = "patch" if is_patch else "analyze"
 
     try:
         image_data = await download_fn(update, context)
@@ -311,15 +345,16 @@ def main() -> None:
 
     app = Application.builder().token(BOT_TOKEN).build()
 
-    app.add_handler(CommandHandler("start", cmd_start))
-    app.add_handler(CommandHandler("stats", cmd_stats))
+    app.add_handler(CommandHandler("start",  cmd_start))
+    app.add_handler(CommandHandler("myid",   cmd_myid))
+    app.add_handler(CommandHandler("stats",  cmd_stats))
     app.add_handler(CallbackQueryHandler(handle_verify_subscription, pattern="^verify_sub$"))
-    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
-    app.add_handler(MessageHandler(filters.Document.IMAGE, handle_document))
+    app.add_handler(MessageHandler(filters.PHOTO,            handle_photo))
+    app.add_handler(MessageHandler(filters.Document.IMAGE,   handle_document))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_text))
     app.add_error_handler(error_handler)
 
-    logger.info("Bot is running. Polling for updates...")
+    logger.info("Bot running. Polling...")
     app.run_polling(
         allowed_updates=["message", "callback_query"],
         drop_pending_updates=True,
