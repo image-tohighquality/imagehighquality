@@ -178,18 +178,45 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     user = update.effective_user
 
     if not _is_admin(user):
-        # Log unauthorized attempt with actual user info to help debug
         logger.warning(
-            f"Unauthorized /stats attempt — "
+            f"Unauthorized /stats — "
             f"id={user.id} username={user.username!r} "
             f"ADMIN_IDENTIFIER={ADMIN_IDENTIFIER!r}"
         )
         await update.message.reply_text(msg.STATS_UNAUTHORIZED)
         return
 
+    # Check if Supabase is configured at all
+    from config import DB_ENABLED, SUPABASE_URL, SUPABASE_KEY
+    if not DB_ENABLED:
+        missing = []
+        if not SUPABASE_URL:
+            missing.append("• SUPABASE_URL")
+        if not SUPABASE_KEY:
+            missing.append("• SUPABASE_ANON_KEY")
+        await update.message.reply_text(
+            "⚠️ <b>Supabase غير مُعدَّة في Railway</b>\n\n"
+            "المتغيرات الناقصة:\n"
+            + "\n".join(missing) +
+            "\n\n"
+            "اذهب إلى Railway → Variables وأضف هذين المتغيرين "
+            "من لوحة Supabase → Settings → API",
+            parse_mode=ParseMode.HTML,
+        )
+        return
+
+    # DB is configured — try to fetch stats
     stats = await get_stats()
     if stats is None:
-        await update.message.reply_text(msg.STATS_UNAVAILABLE)
+        await update.message.reply_text(
+            "⚠️ <b>فشل الاتصال بـ Supabase</b>\n\n"
+            "المتغيرات موجودة لكن الاتصال فشل.\n"
+            "تحقق من:\n"
+            "• صحة SUPABASE_URL\n"
+            "• صحة SUPABASE_ANON_KEY\n"
+            "• تشغيل schema.sql في Supabase → SQL Editor",
+            parse_mode=ParseMode.HTML,
+        )
         return
 
     timestamp = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC")
