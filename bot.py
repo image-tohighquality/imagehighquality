@@ -34,7 +34,7 @@ from config import (
 from rate_limiter import check_rate_limit, seconds_until_reset
 from claude_client import analyze_image, generate_patch
 from subscription import is_member, join_keyboard
-from database import register_user, log_request, get_stats
+from database import register_user, log_request, get_stats, check_connection
 
 # ── Logging ───────────────────────────────────────────────────────────────────
 logging.basicConfig(
@@ -173,6 +173,23 @@ async def cmd_myid(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     )
 
 
+async def cmd_dbcheck(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
+    """Admin-only: test Supabase connection step by step."""
+    user = update.effective_user
+
+    if not _is_admin(user):
+        await update.message.reply_text(msg.STATS_UNAUTHORIZED)
+        return
+
+    checking = await update.message.reply_text("🔍 جاري فحص الاتصال بـ Supabase...")
+    success, detail = await check_connection()
+    icon = "✅" if success else "❌"
+    await checking.edit_text(
+        f"{icon} <b>نتيجة فحص Supabase</b>\n\n<code>{detail}</code>",
+        parse_mode=ParseMode.HTML,
+    )
+
+
 async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Admin-only statistics command."""
     user = update.effective_user
@@ -186,35 +203,24 @@ async def cmd_stats(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         await update.message.reply_text(msg.STATS_UNAUTHORIZED)
         return
 
-    # Check if Supabase is configured at all
-    from config import DB_ENABLED, SUPABASE_URL, SUPABASE_KEY
-    if not DB_ENABLED:
-        missing = []
-        if not SUPABASE_URL:
-            missing.append("• SUPABASE_URL")
-        if not SUPABASE_KEY:
-            missing.append("• SUPABASE_ANON_KEY")
+    # Step 1: test connection first and surface real error
+    success, detail = await check_connection()
+    if not success:
         await update.message.reply_text(
-            "⚠️ <b>Supabase غير مُعدَّة في Railway</b>\n\n"
-            "المتغيرات الناقصة:\n"
-            + "\n".join(missing) +
-            "\n\n"
-            "اذهب إلى Railway → Variables وأضف هذين المتغيرين "
-            "من لوحة Supabase → Settings → API",
+            f"❌ <b>مشكلة في الاتصال بـ Supabase</b>\n\n"
+            f"<code>{detail}</code>\n\n"
+            f"💡 شغّل /dbcheck للتشخيص الكامل",
             parse_mode=ParseMode.HTML,
         )
         return
 
-    # DB is configured — try to fetch stats
+    # Step 2: fetch stats
     stats = await get_stats()
     if stats is None:
         await update.message.reply_text(
-            "⚠️ <b>فشل الاتصال بـ Supabase</b>\n\n"
-            "المتغيرات موجودة لكن الاتصال فشل.\n"
-            "تحقق من:\n"
-            "• صحة SUPABASE_URL\n"
-            "• صحة SUPABASE_ANON_KEY\n"
-            "• تشغيل schema.sql في Supabase → SQL Editor",
+            "⚠️ <b>الاتصال يعمل لكن جلب الإحصائيات فشل</b>\n\n"
+            "تحقق من تشغيل schema.sql في Supabase → SQL Editor\n"
+            "ثم شغّل /dbcheck",
             parse_mode=ParseMode.HTML,
         )
         return
@@ -374,7 +380,8 @@ def main() -> None:
 
     app.add_handler(CommandHandler("start",  cmd_start))
     app.add_handler(CommandHandler("myid",   cmd_myid))
-    app.add_handler(CommandHandler("stats",  cmd_stats))
+    app.add_handler(CommandHandler("stats",   cmd_stats))
+    app.add_handler(CommandHandler("dbcheck", cmd_dbcheck))
     app.add_handler(CallbackQueryHandler(handle_verify_subscription, pattern="^verify_sub$"))
     app.add_handler(MessageHandler(filters.PHOTO,            handle_photo))
     app.add_handler(MessageHandler(filters.Document.IMAGE,   handle_document))
