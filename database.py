@@ -1,8 +1,13 @@
 """
-database.py — Supabase integration for Image Quality Bot v1.5
+database.py — Supabase integration via direct REST API calls (httpx)
+
+Uses httpx directly instead of supabase-py to avoid version conflicts.
+Supabase exposes a PostgREST API at {SUPABASE_URL}/rest/v1/{table}.
+All operations are fully async — no asyncio.to_thread needed.
 """
 
 import asyncio
+import httpx
 import logging
 from datetime import datetime, timezone, timedelta
 from typing import Optional, Tuple
@@ -11,16 +16,20 @@ from config import SUPABASE_URL, SUPABASE_KEY, DB_ENABLED, MAX_IMAGES_PER_HOUR
 
 logger = logging.getLogger(__name__)
 
-_client = None
+# ── Constants ─────────────────────────────────────────────────────────────────
+
+_BASE = f"{SUPABASE_URL.rstrip('/')}/rest/v1" if SUPABASE_URL else ""
+
+_HEADERS = {
+    "apikey":        SUPABASE_KEY,
+    "Authorization": f"Bearer {SUPABASE_KEY}",
+    "Content-Type":  "application/json",
+}
+
+_TIMEOUT = httpx.Timeout(15.0)
 
 
-def _get_client():
-    global _client
-    if _client is None:
-        from supabase import create_client
-        _client = create_client(SUPABASE_URL, SUPABASE_KEY)
-    return _client
-
+# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _today_iso() -> str:
     now = datetime.now(timezone.utc)
@@ -31,21 +40,42 @@ def _one_hour_ago_iso() -> str:
     return (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
 
 
-def _safe_count(result) -> int:
-    """Extract row count from Supabase result — compatible with v1.x and v2.x."""
-    if hasattr(result, "count") and result.count is not None:
-        return int(result.count)
-    if hasattr(result, "data") and result.data is not None:
-        return len(result.data)
-    return 0
+def _parse_count(response: httpx.Response) -> int:
+    """
+    Extract total count from PostgREST Content-Range header.
+    Header format: "0-9/42"  or  "*/42"
+    Falls back to len(data) if header is missing.
+    """
+    cr = response.headers.get("content-range", "")
+    if "/" in cr:
+        right = cr.split("/")[-1]
+        if right.isdigit():
+            return int(right)
+    data = response.json()
+    return len(data) if isinstance(data, list) else 0
+
+
+async def _count(table: str, filters: dict | None = None) -> int:
+    """GET count of rows matching filters using PostgREST."""
+    params: dict = {"select": "*", "limit": "0"}
+    if filters:
+        params.update(filters)
+    async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+        r = await client.get(
+            f"{_BASE}/{table}",
+            headers={**_HEADERS, "Prefer": "count=exact"},
+            params=params,
+        )
+        r.raise_for_status()
+        return _parse_count(r)
 
 
 # ── Connection check ──────────────────────────────────────────────────────────
 
 async def check_connection() -> Tuple[bool, str]:
     """
-    Test the Supabase connection step by step.
-    Returns (success: bool, message: str) — the message is shown to admin.
+    Test the Supabase REST API connection step by step.
+    Returns (success, human-readable message).
     """
     if not DB_ENABLED:
         parts = []
@@ -53,33 +83,39 @@ async def check_connection() -> Tuple[bool, str]:
             parts.append("SUPABASE_URL مفقود")
         if not SUPABASE_KEY:
             parts.append("SUPABASE_ANON_KEY مفقود")
-        return False, "متغيرات غير موجودة: " + " | ".join(parts)
-
-    def _sync() -> Tuple[bool, str]:
-        # Step 1: Create client
-        try:
-            client = _get_client()
-        except Exception as e:
-            return False, f"فشل إنشاء الـ client:\n{type(e).__name__}: {e}"
-
-        # Step 2: Query users table
-        try:
-            result = client.table("users").select("user_id", count="exact").limit(1).execute()
-            users_count = _safe_count(result)
-            return True, f"الاتصال ناجح ✅\nجدول users: {users_count} سجل"
-        except Exception as e:
-            return False, (
-                f"الـ client يعمل لكن الاستعلام فشل:\n"
-                f"{type(e).__name__}: {e}\n\n"
-                f"تحقق من:\n"
-                f"• تشغيل schema.sql في Supabase → SQL Editor\n"
-                f"• صلاحيات anon key على الجداول"
-            )
+        return False, "متغيرات غير موجودة:\n" + "\n".join(parts)
 
     try:
-        return await asyncio.to_thread(_sync)
+        count = await _count("users")
+        return True, f"الاتصال ناجح ✅\nجدول users: {count} مستخدم"
+
+    except httpx.HTTPStatusError as e:
+        code = e.response.status_code
+        if code == 401:
+            return False, (
+                "خطأ مصادقة (401)\n\n"
+                "SUPABASE_ANON_KEY غير صحيح.\n"
+                "انسخه من: Supabase → Settings → API → anon public"
+            )
+        if code == 404:
+            return False, (
+                "جدول users غير موجود (404)\n\n"
+                "شغّل ملف schema.sql في:\n"
+                "Supabase → SQL Editor → New query → Run"
+            )
+        return False, f"HTTP {code}:\n{e.response.text[:300]}"
+
+    except httpx.ConnectError:
+        return False, (
+            f"تعذّر الاتصال بـ Supabase\n\n"
+            f"تحقق من SUPABASE_URL:\n{SUPABASE_URL}"
+        )
+
+    except httpx.TimeoutException:
+        return False, "انتهت مهلة الاتصال (timeout)\nتحقق من اتصال الإنترنت على Railway"
+
     except Exception as e:
-        return False, f"خطأ غير متوقع: {type(e).__name__}: {e}"
+        return False, f"{type(e).__name__}:\n{e}"
 
 
 # ── Write operations ──────────────────────────────────────────────────────────
@@ -89,21 +125,21 @@ async def register_user(
     username: Optional[str],
     first_name: Optional[str],
 ) -> None:
+    """Upsert user record. Silent on failure."""
     if not DB_ENABLED:
         return
-
-    def _sync():
-        _get_client().table("users").upsert(
-            {
-                "user_id":    user_id,
-                "username":   username or "",
-                "first_name": first_name or "",
-            },
-            on_conflict="user_id",
-        ).execute()
-
     try:
-        await asyncio.to_thread(_sync)
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            r = await client.post(
+                f"{_BASE}/users",
+                headers={**_HEADERS, "Prefer": "resolution=merge-duplicates,return=minimal"},
+                json={
+                    "user_id":    user_id,
+                    "username":   username or "",
+                    "first_name": first_name or "",
+                },
+            )
+            r.raise_for_status()
     except Exception as e:
         logger.warning(f"register_user({user_id}) failed: {type(e).__name__}: {e}")
 
@@ -114,21 +150,22 @@ async def log_request(
     success: bool,
     response_time_ms: int,
 ) -> None:
+    """Insert one request record. Silent on failure."""
     if not DB_ENABLED:
         return
-
-    def _sync():
-        _get_client().table("requests").insert(
-            {
-                "user_id":          user_id,
-                "request_type":     request_type,
-                "success":          success,
-                "response_time_ms": response_time_ms,
-            }
-        ).execute()
-
     try:
-        await asyncio.to_thread(_sync)
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            r = await client.post(
+                f"{_BASE}/requests",
+                headers={**_HEADERS, "Prefer": "return=minimal"},
+                json={
+                    "user_id":          user_id,
+                    "request_type":     request_type,
+                    "success":          success,
+                    "response_time_ms": response_time_ms,
+                },
+            )
+            r.raise_for_status()
     except Exception as e:
         logger.warning(f"log_request({user_id}) failed: {type(e).__name__}: {e}")
 
@@ -136,69 +173,59 @@ async def log_request(
 # ── Rate limiting ─────────────────────────────────────────────────────────────
 
 async def count_recent_requests(user_id: int) -> Optional[int]:
-    """Count successful requests in the last hour. Returns None if DB unavailable."""
+    """Count successful requests in the last hour. Returns None if unavailable."""
     if not DB_ENABLED:
         return None
-
-    def _sync() -> int:
-        result = (
-            _get_client()
-            .table("requests")
-            .select("id", count="exact")
-            .eq("user_id", user_id)
-            .eq("success", True)
-            .gte("created_at", _one_hour_ago_iso())
-            .execute()
-        )
-        return _safe_count(result)
-
     try:
-        return await asyncio.to_thread(_sync)
+        return await _count("requests", {
+            "user_id":    f"eq.{user_id}",
+            "success":    "eq.true",
+            "created_at": f"gte.{_one_hour_ago_iso()}",
+        })
     except Exception as e:
         logger.warning(f"count_recent_requests({user_id}) failed: {e}")
         return None
 
 
-# ── Stats ─────────────────────────────────────────────────────────────────────
+# ── Statistics ────────────────────────────────────────────────────────────────
 
 async def get_stats() -> Optional[dict]:
-    """Fetch all statistics. Returns None if DB unavailable or query fails."""
+    """Fetch all stats concurrently. Returns None on failure."""
     if not DB_ENABLED:
         return None
 
-    def _sync() -> dict:
-        c     = _get_client()
+    try:
         today = _today_iso()
 
-        def q_count(table: str, **eq_filters) -> int:
-            query = c.table(table).select("*", count="exact")
-            for col, val in eq_filters.items():
-                if col.startswith("gte__"):
-                    query = query.gte(col[5:], val)
-                else:
-                    query = query.eq(col, val)
-            return _safe_count(query.execute())
-
-        total_users  = q_count("users")
-        today_users  = q_count("users",    gte__joined_at=today)
-        total_req    = q_count("requests")
-        today_req    = q_count("requests", gte__created_at=today)
-        success_req  = q_count("requests", success=True)
-        analyze_req  = q_count("requests", request_type="analyze")
-        patch_req    = q_count("requests", request_type="patch")
-
-        # Average response time (ms → seconds)
-        times_result = (
-            c.table("requests")
-            .select("response_time_ms")
-            .eq("success", True)
-            .execute()
+        # Run all count queries concurrently
+        (
+            total_users, today_users,
+            total_req, today_req,
+            success_req, analyze_req, patch_req,
+        ) = await asyncio.gather(
+            _count("users"),
+            _count("users",    {"joined_at":    f"gte.{today}"}),
+            _count("requests"),
+            _count("requests", {"created_at":   f"gte.{today}"}),
+            _count("requests", {"success":      "eq.true"}),
+            _count("requests", {"request_type": "eq.analyze"}),
+            _count("requests", {"request_type": "eq.patch"}),
         )
-        times = [
-            r["response_time_ms"]
-            for r in (times_result.data or [])
-            if r.get("response_time_ms") is not None
-        ]
+
+        # Average response time
+        async with httpx.AsyncClient(timeout=_TIMEOUT) as client:
+            r = await client.get(
+                f"{_BASE}/requests",
+                headers=_HEADERS,
+                params={"select": "response_time_ms", "success": "eq.true"},
+            )
+            r.raise_for_status()
+            times = [
+                row["response_time_ms"]
+                for row in r.json()
+                if row.get("response_time_ms") is not None
+            ]
+
         avg_ms = int(sum(times) / len(times)) if times else 0
 
         return {
@@ -212,8 +239,6 @@ async def get_stats() -> Optional[dict]:
             "patch_count":   patch_req,
         }
 
-    try:
-        return await asyncio.to_thread(_sync)
     except Exception as exc:
         logger.error(f"get_stats failed: {type(exc).__name__}: {exc}", exc_info=True)
         return None
