@@ -42,9 +42,7 @@ Use the template below. Fill every field with real data from your analysis.
 Remove any section or sub-section that does not apply to this image.
 Zero [fill] tags must remain in the final output.
 
-Output the prompt wrapped in THESE EXACT MARKERS on their own separate lines — no exceptions:
-
-<<<START>>>
+---
 ════════════════════════════════════════════════════════
 🔧  IMAGE RESTORATION PROMPT
 ════════════════════════════════════════════════════════
@@ -198,7 +196,7 @@ IDENTITY RULE: A slightly imperfect but faithful face beats a sharp but drifted 
 
 Restore this image now. Where instructions say do not touch — do not touch.
 ════════════════════════════════════════════════════════
-<<<END>>>
+---
 
 PART 3 — Arabic instructions (always include, exactly as follows):
 
@@ -249,11 +247,7 @@ TOO LITTLE IMPROVEMENT:
 
 Output structure:
 1. Arabic diagnosis (2–3 lines: what caused the problem)
-
-<<<START>>>
 2. English patch prompt (complete, ready to append to original prompt)
-<<<END>>>
-
 3. Arabic instructions (how to use the patch with the original prompt)
 
 Be direct. Be specific. A vague patch prompt is useless."""

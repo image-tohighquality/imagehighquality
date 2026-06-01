@@ -12,52 +12,10 @@ _client = anthropic.AsyncAnthropic(
 )
 
 
-# ── Prompt extraction ─────────────────────────────────────────────────────────
-
-def _extract_prompt(text: str) -> str:
-    """
-    Extract only the English restoration/patch prompt from Claude's full response.
-
-    Primary:   looks for <<<START>>> ... <<<END>>> markers (added to system prompt)
-    Secondary: looks for ════ delimiter lines (fallback for edge cases)
-    Final:     returns full text as-is so the user always gets something useful
-    """
-    # ── Primary: explicit markers ──────────────────────────────────────────
-    if "<<<START>>>" in text and "<<<END>>>" in text:
-        try:
-            start = text.index("<<<START>>>") + len("<<<START>>>")
-            end   = text.index("<<<END>>>")
-            extracted = text[start:end].strip()
-            if len(extracted) > 50:                # sanity: must be substantial
-                return extracted
-        except ValueError:
-            pass
-
-    # ── Secondary: ════ boundary lines ────────────────────────────────────
-    MARKER = "═" * 15
-    lines  = text.splitlines()
-    marker_lines = [i for i, l in enumerate(lines) if MARKER in l]
-    if len(marker_lines) >= 2:
-        extracted = "\n".join(lines[marker_lines[0]:marker_lines[-1] + 1]).strip()
-        if len(extracted) > 50:
-            return extracted
-
-    # ── Final fallback ─────────────────────────────────────────────────────
-    logger.warning("_extract_prompt: markers not found — returning full response")
-    return text.strip()
-
-
-def _raw_text(response: anthropic.types.Message) -> str:
-    return "\n".join(
-        block.text for block in response.content if hasattr(block, "text")
-    ).strip()
-
-
-# ── Public API ────────────────────────────────────────────────────────────────
-
 async def analyze_image(image_b64: str, mime_type: str = "image/jpeg") -> str:
     """
-    Send image to Claude and return ONLY the English restoration prompt.
+    Send image to Claude with skill v4 system prompt.
+    Returns the complete restoration prompt as a string.
     """
     try:
         response = await _client.messages.create(
@@ -84,21 +42,20 @@ async def analyze_image(image_b64: str, mime_type: str = "image/jpeg") -> str:
                 }
             ],
         )
-        full_text = _raw_text(response)
-        prompt    = _extract_prompt(full_text)
-        logger.info(f"analyze_image: full={len(full_text)}c extracted={len(prompt)}c")
-        return prompt
+        text = _extract_text(response)
+        logger.info(f"analyze_image completed: {len(text)} chars")
+        return text
 
     except anthropic.RateLimitError:
-        logger.warning("Claude rate limit hit")
+        logger.warning("Claude API rate limit reached")
         return "⚠️ الطلبات على الذكاء الاصطناعي كثيرة حالياً. انتظر دقيقة واحدة ثم أعد الإرسال."
 
     except anthropic.BadRequestError as e:
-        logger.error(f"Claude bad request: {e}")
+        logger.error(f"Claude rejected the image: {e}")
         raise ValueError("IMAGE_UNREADABLE")
 
     except (anthropic.APITimeoutError, asyncio.TimeoutError):
-        logger.error(f"Claude timed out after {CLAUDE_TIMEOUT}s")
+        logger.error(f"Claude API timed out after {CLAUDE_TIMEOUT}s")
         raise TimeoutError("Claude API timeout")
 
     except anthropic.APIConnectionError as e:
@@ -115,9 +72,7 @@ async def generate_patch(
     problem_description: str,
     mime_type: str = "image/jpeg",
 ) -> str:
-    """
-    Analyze a failed result and return ONLY the English patch prompt.
-    """
+    """Analyze a failed result and generate a targeted patch prompt."""
     try:
         response = await _client.messages.create(
             model=CLAUDE_MODEL,
@@ -147,10 +102,7 @@ async def generate_patch(
                 }
             ],
         )
-        full_text = _raw_text(response)
-        prompt    = _extract_prompt(full_text)
-        logger.info(f"generate_patch: full={len(full_text)}c extracted={len(prompt)}c")
-        return prompt
+        return _extract_text(response)
 
     except anthropic.RateLimitError:
         return "⚠️ الطلبات كثيرة حالياً. انتظر دقيقة ثم أعد الإرسال."
@@ -161,3 +113,9 @@ async def generate_patch(
     except anthropic.APIError as e:
         logger.error(f"Claude API error in patch: {e}")
         raise
+
+
+def _extract_text(response: anthropic.types.Message) -> str:
+    return "\n".join(
+        block.text for block in response.content if hasattr(block, "text")
+    ).strip()
